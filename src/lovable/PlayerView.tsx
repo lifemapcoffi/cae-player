@@ -781,6 +781,38 @@ async function preloadNextNarration() {
     segmentsRef.current = segments;
   }, [segments]);
 
+  // Suggestions cache (canon_cursor -> suggestions)
+  const suggestionsCacheRef = useRef<Map<string, string[]>>(new Map());
+  const suggestionsAbortRef = useRef<AbortController | null>(null);
+
+  async function fetchSuggestionsForCursor(cursor: string) {
+    if (!episodeId || !cursor) return [];
+
+    // cache hit
+    const hit = suggestionsCacheRef.current.get(cursor);
+    if (hit) return hit;
+
+    try {
+      const res = await api.get<{ suggestions: string[] }>("/suggestions", {
+        episode_id: episodeId,
+        canon_cursor: cursor,
+      });
+
+      const list = res.suggestions || [];
+      suggestionsCacheRef.current.set(cursor, list);
+      return list;
+    } catch {
+      const list: string[] = [];
+      suggestionsCacheRef.current.set(cursor, list);
+      return list;
+    }
+  }
+
+  function setSuggestionsForCursorIfCached(cursor: string) {
+    const hit = suggestionsCacheRef.current.get(cursor);
+    if (hit) setSuggestions(hit);
+  }
+
   // -------------------------
 // Narration audio events (A/B double-buffer, gapless-safe)
 // -------------------------
@@ -881,6 +913,14 @@ useEffect(() => {
   const newActive = getActiveNarrationEl();
 
   setIdx(nextIdx);
+
+  const nextCursor = segmentsRef.current[nextIdx]?.canon_cursor;
+  if (nextCursor) {
+    // instant UI if cached
+    setSuggestionsForCursorIfCached(nextCursor);
+    // ensure fetched (if not cached)
+    setTimeout(() => void fetchSuggestionsForCursor(nextCursor), 0);
+  }
 
   try {
     if (!newActive || !newActive.src) {
@@ -1063,26 +1103,32 @@ useEffect(() => {
   // Suggestions on segment change
   // -------------------------
   useEffect(() => {
-    if (!episodeId || !current?.canon_cursor) return;
+    if (!episodeId) return;
+    if (!current?.canon_cursor) return;
 
     let cancelled = false;
 
+    const cursor = current.canon_cursor;
+    const nextCursor = segments[idx + 1]?.canon_cursor;
+
+    // 1) instant UI: si déjà en cache, on set tout de suite
+    setSuggestionsForCursorIfCached(cursor);
+
+    // 2) fetch (si pas en cache) puis update UI
     (async () => {
-      try {
-        const res = await api.get<{ suggestions: string[] }>("/suggestions", {
-          episode_id: episodeId,
-          canon_cursor: current.canon_cursor,
-        });
-        if (!cancelled) setSuggestions(res.suggestions || []);
-      } catch {
-        if (!cancelled) setSuggestions([]);
-      }
+      const list = await fetchSuggestionsForCursor(cursor);
+      if (!cancelled) setSuggestions(list);
     })();
+
+    // 3) prefetch next (silencieux)
+    if (nextCursor) {
+      void fetchSuggestionsForCursor(nextCursor);
+    }
 
     return () => {
       cancelled = true;
     };
-  }, [episodeId, current?.canon_cursor]);
+  }, [episodeId, current?.canon_cursor, idx, segments]);
 
   // -------------------------
   // SFX scheduling (simple)
