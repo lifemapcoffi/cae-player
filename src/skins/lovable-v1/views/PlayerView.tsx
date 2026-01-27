@@ -268,8 +268,7 @@ function TranscriptDrawer({
             {/* Current segment (karaoke highlight if in text mode) */}
             <div className="mb-4">
               <div className="text-xs uppercase tracking-wide text-foreground-subtle mb-2">
-                Segment {currentIdx + 1} / {segments.length}
-                {narrationMode === "text" ? " · Karaoké" : ""}
+                En cours{narrationMode === "text" ? " · Karaoké" : ""}
               </div>
 
               <div className="glass-panel border border-white/10 p-3">
@@ -308,8 +307,8 @@ function TranscriptDrawer({
                   >
                     <div className="flex items-center justify-between gap-3 mb-1">
                       <div className={cn("text-xs", isCurrent ? "text-white/80" : "text-foreground-subtle")}>
-                        Segment {i + 1}
-                      </div>
+                        {isCurrent ? "EN COURS" : "Passage"}
+                    </div>
                       {isCurrent ? <span className="text-[10px] text-white/70">EN COURS</span> : null}
                     </div>
                     <div className={cn("text-sm line-clamp-2", isCurrent ? "text-white/90" : "text-foreground/85")}>
@@ -332,9 +331,25 @@ export default function PlayerView() {
 
   const [micState, setMicState] = useState<MicState>("idle");
 
-  // Narration audio player
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
+  // Narration audio players (double-buffer for seamless)
+  const narrationARef = useRef<HTMLAudioElement | null>(null);
+  const narrationBRef = useRef<HTMLAudioElement | null>(null);
+
+  // for base64 blob cleanup (per active play)
+  const narrationBlobUrlRef = useRef<string | null>(null);
+
+  // which one is currently "active" (playing/controlled)
+  const activeNarrationRef = useRef<"A" | "B">("A");
+
+  function getActiveNarrationEl() {
+    return activeNarrationRef.current === "A" ? narrationARef.current : narrationBRef.current;
+  }
+  function getInactiveNarrationEl() {
+    return activeNarrationRef.current === "A" ? narrationBRef.current : narrationARef.current;
+  }
+  function flipActiveNarration() {
+    activeNarrationRef.current = activeNarrationRef.current === "A" ? "B" : "A";
+  }
 
   // BGM + SFX players
   const bgmRef = useRef<HTMLAudioElement | null>(null);
@@ -460,14 +475,6 @@ export default function PlayerView() {
   // -------------------------
   // Cleanup helpers
   // -------------------------
-  function cleanupObjectUrl() {
-    if (audioUrlRef.current) {
-      try {
-        URL.revokeObjectURL(audioUrlRef.current);
-      } catch {}
-      audioUrlRef.current = null;
-    }
-  }
 
   function stopSfxTimer() {
     if (sfxTimerRef.current) {
@@ -499,18 +506,6 @@ export default function PlayerView() {
     setDuration(0);
   }
 
-  function stopNarrationAudio() {
-    const a = audioRef.current;
-    if (a) {
-      try {
-        a.pause();
-      } catch {}
-      a.src = "";
-    }
-    cleanupObjectUrl();
-    resetNarrationAudioState();
-  }
-
   function pauseBgmHard() {
     const bgm = bgmRef.current;
     if (!bgm) return;
@@ -524,94 +519,158 @@ export default function PlayerView() {
     // keep textVisibleChars for resume
   }
 
-    function pauseAllPlayback() {
-      // Narration
-      const a = audioRef.current;
-      if (a && !a.paused) {
-        try {
-          a.pause();
-        } catch {}
-      }
+  function pauseAllPlayback() {
+    // Narration (active only)
+    pauseActiveNarration();
 
-      // Text mode
-      stopTextPlayback();
+    // Text mode
+    stopTextPlayback();
 
-      // BGM (pause doux)
-      bgmFadeOutAndPause();
+    // BGM (pause doux)
+    bgmFadeOutAndPause();
 
-      // SFX: pause si en cours, et stop timer
-      stopSfxTimer();
-      const sfx = sfxRef.current;
-      if (sfx) {
-        try {
-          sfxWasPlayingRef.current = !sfx.paused && sfx.currentTime > 0;
-          sfx.pause();
-        } catch {}
-      }
-
-      setIsPlaying(false);
+    // SFX: pause si en cours, et stop timer
+    stopSfxTimer();
+    const sfx = sfxRef.current;
+    if (sfx) {
+      try {
+        sfxWasPlayingRef.current = !sfx.paused && sfx.currentTime > 0;
+        sfx.pause();
+      } catch {}
     }
 
-  function stopAllPlayback() {
-    stopNarrationAudio();
-    bgmFadeOutAndPause(true);
-    stopSfxTimer();
-    stopSfxNow();
-    setTextStartedAt(null);
-    setTextVisibleChars(0);
     setIsPlaying(false);
-    setDuration(0);
-    setCurrentTime(0);
   }
 
+  function stopAllPlayback() {
+  stopAllNarration();
+
+  // remettre A actif AVANT de calculer active/inactive
+  activeNarrationRef.current = "A";
+
+  // maintenant seulement, on peut clear l'inactif
+  const inactive = getInactiveNarrationEl();
+  if (inactive) inactive.removeAttribute("src");
+
+  bgmFadeOutAndPause(true);
+  stopSfxTimer();
+  stopSfxNow();
+  setTextStartedAt(null);
+  setTextVisibleChars(0);
+  setIsPlaying(false);
+  setDuration(0);
+  setCurrentTime(0);
+}
+
   async function playBase64Audio(audio: AudioPayload) {
-    stopNarrationAudio();
-    const a = audioRef.current;
+    // stop both narration els
+    stopNarrationAudioHard(narrationARef.current);
+    stopNarrationAudioHard(narrationBRef.current);
+    cleanupNarrationBlobUrl();
+
+    // on rejoue sur l'active
+    const a = getActiveNarrationEl();
     if (!a) return;
 
     const url = b64ToBlobUrl(audio.audio_base64, audio.mime || "audio/mpeg");
-    audioUrlRef.current = url;
-    a.src = url;
+    narrationBlobUrlRef.current = url;
 
-      setCurrentTime(0);
-      await a.play();
-      setIsPlaying(true); // ✅ garantit aussi pour l’audio ElevenLabs / ask
+    a.src = url;
+    setCurrentTime(0);
+    await a.play();
+    setIsPlaying(true);
   }
 
-  async function playUrlAudio(url: string, opts?: { volume?: number | null; atMs?: number | null }) {
-    stopNarrationAudio();
-    const a = audioRef.current;
-    if (!a) return;
+  function cleanupNarrationBlobUrl() {
+  if (narrationBlobUrlRef.current) {
+    try { URL.revokeObjectURL(narrationBlobUrlRef.current); } catch {}
+    narrationBlobUrlRef.current = null;
+  }
+}
 
-    // IMPORTANT: do NOT set audioUrlRef here (only for blob URLs)
-    a.src = url;
+function stopNarrationAudioHard(el?: HTMLAudioElement | null) {
+  const a = el ?? getActiveNarrationEl();
+  if (!a) return;
+  try { a.pause(); } catch {}
+  try { a.currentTime = 0; } catch {}
+  a.removeAttribute("src");
+  // NOTE: do not cleanup blob here unless you know it's blob
+}
 
-    // volume
-    const vol = Math.max(0, Math.min(1, safeNumber(opts?.volume, 1)));
-    a.volume = vol;
+function pauseActiveNarration() {
+  const a = getActiveNarrationEl();
+  if (!a) return;
+  try { a.pause(); } catch {}
+}
 
-    // optional seek
-    const atSec = Math.max(0, safeNumber(opts?.atMs, 0) / 1000);
-    if (atSec > 0) {
-      // if metadata not ready yet, wait once
-      if (!Number.isFinite(a.duration) || a.duration === 0) {
-       await new Promise<void>((resolve) => {
+function stopAllNarration() {
+  stopNarrationAudioHard(narrationARef.current);
+  stopNarrationAudioHard(narrationBRef.current);
+  cleanupNarrationBlobUrl();
+}
+
+async function setNarrationSrcAndPlay(
+  el: HTMLAudioElement,
+  url: string,
+  opts?: { volume?: number | null; atMs?: number | null; autoplay?: boolean }
+) {
+  el.src = url;
+
+  const vol = Math.max(0, Math.min(1, safeNumber(opts?.volume, 1)));
+  el.volume = vol;
+
+  const atSec = Math.max(0, safeNumber(opts?.atMs, 0) / 1000);
+  if (atSec > 0) {
+    if (!Number.isFinite(el.duration) || el.duration === 0) {
+      await new Promise<void>((resolve) => {
         const onMeta = () => {
-          a.removeEventListener("loadedmetadata", onMeta);
+          el.removeEventListener("loadedmetadata", onMeta);
           resolve();
         };
-        a.addEventListener("loadedmetadata", onMeta, { once: true });
+        el.addEventListener("loadedmetadata", onMeta, { once: true });
       });
     }
-    try {
-      a.currentTime = atSec;
-    } catch {}
+    try { el.currentTime = atSec; } catch {}
   }
 
-      setCurrentTime(0);
-      await a.play();
-      setIsPlaying(true); // ✅ garantit que l’UI passe en Pause
+  if (opts?.autoplay !== false) {
+    await el.play();
+  } else {
+    // preload only
+    try { el.load(); } catch {}
   }
+}
+
+function resolveNarrationUrlForSegment(seg: Segment | null | undefined) {
+  if (!seg) return "";
+  return resolvePublicAssetUrl(seg.narration_url || "");
+}
+
+async function preloadNextNarration() {
+  const nextSeg = segments[idx + 1];
+  const nextUrl = resolveNarrationUrlForSegment(nextSeg);
+  const inactive = getInactiveNarrationEl();
+  if (!inactive) return;
+
+  // Pas de narration => pas de preload
+  if (!nextUrl) {
+    inactive.removeAttribute("src");
+    return;
+  }
+
+  // Evite de reload si c’est déjà la bonne source
+  if (inactive.src === nextUrl) return;
+
+  try {
+    await setNarrationSrcAndPlay(inactive, nextUrl, {
+      volume: nextSeg?.narration_volume ?? 1,
+      atMs: nextSeg?.narration_at_ms ?? 0,
+      autoplay: false, // preload only
+    });
+  } catch {
+    // Si preload échoue, on n'empêche pas la lecture courante
+  }
+}
 
   // -------------------------
   // Persist toggles
@@ -710,56 +769,169 @@ export default function PlayerView() {
     }, 60);
   }
 
-  // -------------------------
-  // Narration audio events
-  // -------------------------
+  // refs anti-closure (source de vérité sync)
+  const idxRef = useRef(0);
+  const segmentsRef = useRef<Segment[]>([]);
+
   useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
+    idxRef.current = idx;
+  }, [idx]);
 
-    const syncIsPlaying = () => {
-      // ✅ source de vérité: état réel de l'élément audio
-      setIsPlaying(Boolean(a && !a.paused));
-    };
+  useEffect(() => {
+    segmentsRef.current = segments;
+  }, [segments]);
 
-    const onPlaying = () => {
-      syncIsPlaying();
-      if (narrationMode === "audio") applyDucking(true);
-    };
+  // -------------------------
+// Narration audio events (A/B double-buffer, gapless-safe)
+// -------------------------
+useEffect(() => {
+  const aEl = narrationARef.current;
+  const bEl = narrationBRef.current;
+  if (!aEl || !bEl) return;
 
-    const onPause = () => {
-      syncIsPlaying();
-      if (narrationMode === "audio") applyDucking(false);
-    };
+  const syncFromActive = () => {
+    const active = getActiveNarrationEl();
+    if (!active) return;
+    setIsPlaying(!active.paused);
+  };
 
-    const onTime = () => {
-      setCurrentTime(a.currentTime || 0);
-      // ✅ maintient l’UI en sync même si un event est raté
-      syncIsPlaying();
-    };
-    
-    const onLoaded = () => setDuration(a.duration || 0);
-    const onEnded = () => {
-      if (narrationMode === "audio") applyDucking(false);
-      setIsPlaying(false);
-      void goNextAndAutoplay();
-    };
+  const onPlaying = () => {
+    syncFromActive();
+    if (narrationMode === "audio") applyDucking(true);
+  };
 
-    a.addEventListener("playing", onPlaying);
-    a.addEventListener("pause", onPause);
-    a.addEventListener("timeupdate", onTime);
-    a.addEventListener("loadedmetadata", onLoaded);
-    a.addEventListener("ended", onEnded);
+  const onPause = () => {
+    syncFromActive();
+    if (narrationMode === "audio") applyDucking(false);
+  };
 
-    return () => {
-      a.removeEventListener("playing", onPlaying);
-      a.removeEventListener("pause", onPause);
-      a.removeEventListener("timeupdate", onTime);
-      a.removeEventListener("loadedmetadata", onLoaded);
-      a.removeEventListener("ended", onEnded);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [narrationMode, musicEnabled, bgmVolume, autoplayEnabled, idx, segments.length]);
+  const onTime = () => {
+    const active = getActiveNarrationEl();
+    if (!active) return;
+    setCurrentTime(active.currentTime || 0);
+    syncFromActive();
+  };
+
+  const onLoaded = () => {
+    const active = getActiveNarrationEl();
+    if (!active) return;
+    setDuration(active.duration || 0);
+  };
+
+  // helper: schedule SFX for a specific segment (NOT "current" state)
+  const scheduleSfxForSegment = (seg: Segment | null | undefined, opts?: { immediate?: boolean }) => {
+    stopSfxTimer();
+    stopSfxNow();
+
+    if (!sfxEnabled) return;
+    if (!seg?.sfx_url) return;
+
+    const sfxUrl = resolvePublicAssetUrl(seg.sfx_url || "");
+    if (!sfxUrl) return;
+
+    const baseDelayMs = Math.max(0, safeNumber(seg.sfx_at_ms, 0));
+
+    // align to narration time (best-effort)
+    const active = getActiveNarrationEl();
+    const narrationMs =
+      narrationMode === "audio" && active ? Math.floor((active.currentTime || 0) * 1000) : 0;
+
+    const remainingMs = Math.max(0, baseDelayMs - narrationMs);
+    const delayMs = opts?.immediate ? 0 : remainingMs;
+
+    const vol = Math.max(0, Math.min(1, safeNumber(seg.sfx_volume, 0.8)));
+
+    sfxTimerRef.current = window.setTimeout(async () => {
+      const sfx = sfxRef.current;
+      if (!sfx) return;
+      try {
+        sfx.volume = vol;
+        sfx.src = sfxUrl;
+        await sfx.play();
+      } catch {}
+    }, delayMs);
+  };
+
+  const onEnded = async () => {
+  // ⚠️ anti-pop: si on enchaîne sur le segment suivant, on reste DUCKED (pas de remontée)
+  const localIdx = idxRef.current;
+  const segs = segmentsRef.current;
+
+  const willChain = autoplayEnabled && localIdx < segs.length - 1;
+
+  if (narrationMode === "audio") {
+    if (willChain) {
+      // reste ducked + lisse vers le niveau ducked (au cas où ça aurait commencé à remonter)
+      applyDucking(true);
+    } else {
+      // fin réelle => on remonte le BGM
+      applyDucking(false);
+    }
+  }
+
+  setIsPlaying(false);
+
+  if (!willChain) return;
+
+  const nextIdx = localIdx + 1;
+  const nextSeg = segs[nextIdx] || null;
+
+  // flip: inactive (preloaded) becomes active
+  flipActiveNarration();
+  const newActive = getActiveNarrationEl();
+
+  setIdx(nextIdx);
+
+  try {
+    if (!newActive || !newActive.src) {
+      setTimeout(() => void playNarration(), 0);
+      return;
+    }
+
+    setCurrentTime(0);
+
+    await bgmFadeIn();
+
+    // ✅ toujours ducked juste avant le play (double-sécurité anti-pop)
+    applyDucking(true);
+
+    scheduleSfxForSegment(nextSeg, { immediate: true });
+
+    await newActive.play();
+    setIsPlaying(true);
+
+    setTimeout(() => void preloadNextNarration(), 0);
+  } catch {
+    setTimeout(() => void playNarration(), 0);
+  }
+};
+
+  const bind = (el: HTMLAudioElement) => {
+    el.addEventListener("playing", onPlaying);
+    el.addEventListener("pause", onPause);
+    el.addEventListener("timeupdate", onTime);
+    el.addEventListener("loadedmetadata", onLoaded);
+    el.addEventListener("ended", onEnded);
+  };
+
+  const unbind = (el: HTMLAudioElement) => {
+    el.removeEventListener("playing", onPlaying);
+    el.removeEventListener("pause", onPause);
+    el.removeEventListener("timeupdate", onTime);
+    el.removeEventListener("loadedmetadata", onLoaded);
+    el.removeEventListener("ended", onEnded);
+  };
+
+  bind(aEl);
+  bind(bEl);
+
+  return () => {
+    unbind(aEl);
+    unbind(bEl);
+  };
+  // important: do NOT depend on idx/segments (we use refs to avoid closures)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [narrationMode, autoplayEnabled, musicEnabled, bgmVolume, sfxEnabled]);
 
   // -------------------------
   // Karaoke loop + autoplay
@@ -928,10 +1100,11 @@ export default function PlayerView() {
         const baseDelayMs = Math.max(0, safeNumber(current.sfx_at_ms, 0));
 
     // If narration already started, align SFX with narration time (best-effort)
+    const active = getActiveNarrationEl();
     const narrationMs =
-      narrationMode === "audio" && audioRef.current
-        ? Math.floor((audioRef.current.currentTime || 0) * 1000)
-        : 0;
+    narrationMode === "audio" && active
+      ? Math.floor((active.currentTime || 0) * 1000)
+      : 0;
 
     const remainingMs = Math.max(0, baseDelayMs - narrationMs);
     const delayMs = options?.immediate ? 0 : remainingMs;
@@ -949,57 +1122,68 @@ export default function PlayerView() {
   }
 
   // -------------------------
-  // Play narration (audio -> fallback text)
-  // -------------------------
-  async function playNarration() {
-    try {
-      setErr("");
-      if (!current) return;
+// Play narration (audio -> fallback text)
+// -------------------------
+async function playNarration() {
+  try {
+    setErr("");
+    if (!current) return;
 
-      setHasStartedPlayback(true);
+    setHasStartedPlayback(true);
 
-      await bgmFadeIn();
-      scheduleSfxForCurrentSegment({ immediate: true });
+    await bgmFadeIn();
+    scheduleSfxForCurrentSegment({ immediate: true });
 
-      // ✅ Narration must come from a pre-recorded mp3 track
-      const narrationUrl = resolvePublicAssetUrl(current.narration_url || "");
-      if (!narrationUrl) {
-        // fallback to text (no narration track)
-        stopNarrationAudio();
-
-        setNarrationMode("text");
-        setIsPlaying(true);
-        setTextVisibleChars(0);
-        setTextStartedAt(performance.now());
-
-        setErr("Narration mp3 manquante pour ce segment (fallback texte).");
-        return;
-      }
-
-      setNarrationMode("audio");
-      setIsPlaying(true);
-
-      await playUrlAudio(narrationUrl, {
-        volume: current.narration_volume ?? 1,
-        atMs: current.narration_at_ms ?? 0,
-      });
-    } catch (e) {
-      // If mp3 fails, fallback to text
-      stopNarrationAudio();
-
-      await bgmFadeIn();
-      scheduleSfxForCurrentSegment({ immediate: true });
+    // ✅ Narration must come from a pre-recorded mp3 track
+    const narrationUrl = resolvePublicAssetUrl(current.narration_url || "");
+    if (!narrationUrl) {
+      // fallback to text (no narration track)
+      stopAllNarration();
 
       setNarrationMode("text");
       setIsPlaying(true);
       setTextVisibleChars(0);
       setTextStartedAt(performance.now());
 
-      setHasStartedPlayback(true);
-
-      setErr(`Narration mp3 indisponible (fallback texte). ${String(e)}`);
+      setErr("Narration mp3 manquante pour ce segment (fallback texte).");
+      return;
     }
+
+    // AUDIO
+    setNarrationMode("audio");
+    setIsPlaying(true);
+
+    // stop both narration els to avoid overlap (A/B)
+    stopAllNarration();
+
+    const active = getActiveNarrationEl();
+    if (!active) return;
+
+    await setNarrationSrcAndPlay(active, narrationUrl, {
+      volume: current.narration_volume ?? 1,
+      atMs: current.narration_at_ms ?? 0,
+      autoplay: true,
+    });
+
+    // ✅ prepare next segment narration (preload on inactive)
+    void preloadNextNarration();
+  } catch (e) {
+    // If mp3 fails, fallback to text
+    stopAllNarration();
+
+    await bgmFadeIn();
+    scheduleSfxForCurrentSegment({ immediate: true });
+
+    setNarrationMode("text");
+    setIsPlaying(true);
+    setTextVisibleChars(0);
+    setTextStartedAt(performance.now());
+
+    setHasStartedPlayback(true);
+
+    setErr(`Narration mp3 indisponible (fallback texte). ${String(e)}`);
   }
+}
 
   async function ask(question: string) {
     try {
@@ -1096,6 +1280,12 @@ export default function PlayerView() {
     else setMicState("idle");
   }, [isPlaying, hasStartedPlayback, micState]);
 
+  useEffect(() => {
+    // dès qu'on a un segment courant, on prépare le suivant
+    void preloadNextNarration();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, segments.length]);
+
   // -------------------------
   // Render guards
   // -------------------------
@@ -1152,7 +1342,8 @@ export default function PlayerView() {
       {/* Hidden players */}
       <audio ref={bgmRef} />
       <audio ref={sfxRef} />
-      <audio ref={audioRef} className="hidden" />
+      <audio ref={narrationARef} className="hidden" preload="auto" />
+      <audio ref={narrationBRef} className="hidden" preload="auto" />
 
       {/* Header (no scroll) */}
       <header className="shrink-0 px-4 sm:px-6 py-4 sm:py-5 flex items-center gap-3 sm:gap-4">
@@ -1163,7 +1354,7 @@ export default function PlayerView() {
         <div className="flex-1 min-w-0">
           <p className="text-xs text-foreground-subtle uppercase tracking-wide truncate">{seasonTitle}</p>
           <p className="text-[11px] text-foreground-muted truncate">
-            Segment {idx + 1} / {segments.length}
+            {episode?.synopsis ? "Lecture" : ""}
           </p>
         </div>
 
@@ -1259,7 +1450,7 @@ export default function PlayerView() {
           </div>
         </div>
 
-        <h1 className="text-xl sm:text-2xl font-semibold text-foreground text-center mb-2 animate-fade-in px-2">
+        <h1 className="text-xl sm:text-2xl font-semibold text-white text-center mb-2 animate-fade-in px-2">
           {episodeTitle}
         </h1>
 
@@ -1276,7 +1467,7 @@ export default function PlayerView() {
         <AudioControls
           isPlaying={isPlaying}
           onPlayPause={async () => {
-            const a = audioRef.current;
+            const a = getActiveNarrationEl();
 
             // ✅ source of truth: audio element state (when in audio mode)
             const actuallyPlaying =
@@ -1321,6 +1512,10 @@ export default function PlayerView() {
                 await bgmFadeIn();
                 scheduleSfxForCurrentSegment(); // resync based on currentTime
                 await a.play();
+
+                // ✅ FORCING UI SYNC (le bug vient de là)
+                setIsPlaying(true);
+                applyDucking(true);
               } catch (e) {
                 setErr(`Playback failed: ${String(e)}`);
               }
