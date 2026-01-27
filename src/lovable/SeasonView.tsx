@@ -274,7 +274,7 @@ export default function SeasonView() {
                       summary={(e.synopsis || "").toString()}
                       coverUrl={resolvePublicAssetUrl(e.cover_url)}
                       duration={""}
-                      onPlay={() => navigate(`${SKIN_BASE}/play/${encodeURIComponent(e.id)}`)}
+                      onSelect={() => navigate(`${SKIN_BASE}/play/${encodeURIComponent(e.id)}`)}
                     />
                   </div>
                 );

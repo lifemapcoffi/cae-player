@@ -47,6 +47,11 @@ type Segment = {
   sfx_url?: string | null;
   sfx_at_ms?: number | null; // ms after segment start (best-effort)
   sfx_volume?: number | null;
+
+  // ✅ Narration track (mp3) — like BGM/SFX
+  narration_url?: string | null;
+  narration_at_ms?: number | null; // ms offset inside the narration file (best-effort)
+  narration_volume?: number | null; // 0..1
 };
 
 type Profile = {
@@ -556,6 +561,40 @@ export default function PlayerView() {
     await a.play();
   }
 
+  async function playUrlAudio(url: string, opts?: { volume?: number | null; atMs?: number | null }) {
+    stopNarrationAudio();
+    const a = audioRef.current;
+    if (!a) return;
+
+    // IMPORTANT: do NOT set audioUrlRef here (only for blob URLs)
+    a.src = url;
+
+    // volume
+    const vol = Math.max(0, Math.min(1, safeNumber(opts?.volume, 1)));
+    a.volume = vol;
+
+    // optional seek
+    const atSec = Math.max(0, safeNumber(opts?.atMs, 0) / 1000);
+    if (atSec > 0) {
+      // if metadata not ready yet, wait once
+      if (!Number.isFinite(a.duration) || a.duration === 0) {
+       await new Promise<void>((resolve) => {
+        const onMeta = () => {
+          a.removeEventListener("loadedmetadata", onMeta);
+          resolve();
+        };
+        a.addEventListener("loadedmetadata", onMeta, { once: true });
+      });
+    }
+    try {
+      a.currentTime = atSec;
+    } catch {}
+  }
+
+    setCurrentTime(0);
+    await a.play();
+  }
+
   // -------------------------
   // Persist toggles
   // -------------------------
@@ -886,16 +925,30 @@ export default function PlayerView() {
       await bgmFadeIn();
       scheduleSfxForCurrentSegment({ immediate: true });
 
+      // ✅ Narration must come from a pre-recorded mp3 track
+      const narrationUrl = resolvePublicAssetUrl(current.narration_url || "");
+      if (!narrationUrl) {
+        // fallback to text (no narration track)
+        stopNarrationAudio();
+
+        setNarrationMode("text");
+        setIsPlaying(true);
+        setTextVisibleChars(0);
+        setTextStartedAt(performance.now());
+
+        setErr("Narration mp3 manquante pour ce segment (fallback texte).");
+        return;
+      }
+
       setNarrationMode("audio");
       setIsPlaying(true);
 
-      const res = await api.post<{ audio: AudioPayload }>("/tts", {
-        text: current.segment_text,
-        speaker_id: current.speaker_id,
+      await playUrlAudio(narrationUrl, {
+        volume: current.narration_volume ?? 1,
+        atMs: current.narration_at_ms ?? 0,
       });
-
-      await playBase64Audio(res.audio);
     } catch (e) {
+      // If mp3 fails, fallback to text
       stopNarrationAudio();
 
       await bgmFadeIn();
@@ -908,7 +961,7 @@ export default function PlayerView() {
 
       setHasStartedPlayback(true);
 
-      setErr(`Audio indisponible (fallback texte). ${String(e)}`);
+      setErr(`Narration mp3 indisponible (fallback texte). ${String(e)}`);
     }
   }
 
