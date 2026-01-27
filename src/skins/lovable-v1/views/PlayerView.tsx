@@ -1,18 +1,18 @@
 // src/lovable/PlayerView.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ChevronLeft, Music, Volume2 } from "lucide-react";
+import { ChevronLeft, Music, Volume2, FileText, X } from "lucide-react";
 import { CircularCover } from "@/components/CircularCover";
 import { ProgressRing } from "@/components/ProgressRing";
 import { OrbAnimation } from "@/components/OrbAnimation";
 import { AudioControls } from "@/components/AudioControls";
 import { SuggestionChips } from "@/components/SuggestionChips";
-import SuggestionOrbit from "@/components/SuggestionOrbit";
 import { AIResponseDrawer } from "@/components/AIResponseDrawer";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { resolvePublicAssetUrl } from "@/lib/assets";
 import { MicIcon } from "@/components/icons/MicIcon";
+import { cn } from "@/lib/utils";
 
 const SKIN_BASE = "/skins/lovable-v1";
 
@@ -47,6 +47,11 @@ type Segment = {
   sfx_url?: string | null;
   sfx_at_ms?: number | null; // ms after segment start (best-effort)
   sfx_volume?: number | null;
+
+  // ✅ Narration track (mp3) — like BGM/SFX
+  narration_url?: string | null;
+  narration_at_ms?: number | null; // ms offset inside the narration file (best-effort)
+  narration_volume?: number | null; // 0..1
 };
 
 type Profile = {
@@ -101,6 +106,226 @@ function saveContinueListening(payload: ContinueListening) {
 
 const FADE_STEP_MS = 25;
 
+/**
+ * Desktop-only orbit bubbles rendered locally to avoid transform conflicts
+ * (and guarantee "float" + right-side orbit around the cover).
+ */
+function DesktopOrbit({
+  suggestions,
+  disabled,
+  onSelect,
+}: {
+  suggestions: string[];
+  disabled?: boolean;
+  onSelect: (s: string) => void;
+}) {
+  const items = (suggestions || []).slice(0, 3);
+
+  // arc offsets relative to the orbit container, tuned to sit “around” the cover
+  const ARC = [
+    { x: 0, y: -46 },
+    { x: 18, y: 0 },
+    { x: 0, y: 46 },
+  ];
+
+  if (!items.length) return null;
+
+  return (
+    <div className="w-85 flex flex-col gap-3 pointer-events-auto">
+      {items.map((s, i) => {
+        const p = ARC[i] || ARC[1];
+        return (
+          <button
+            key={`${i}-${s}`}
+            type="button"
+            disabled={disabled}
+            onClick={() => onSelect(s)}
+            title={s}
+            className={cn(
+              "group relative text-left",
+              "px-4 py-2.5 rounded-full",
+              "border border-white/10 bg-white/5 backdrop-blur-xl",
+              "text-[13px] leading-snug text-white/90",
+              "shadow-[0_10px_35px_rgba(0,0,0,0.28)]",
+              "transition transform-gpu will-change-transform",
+              "hover:bg-white/10 hover:border-white/20 hover:shadow-[0_14px_45px_rgba(0,0,0,0.35)]",
+              "active:scale-[0.99]",
+              "truncate",
+              disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer",
+              i === 0 ? "animate-float-1" : i === 1 ? "animate-float-2" : "animate-float-3"
+            )}
+            // IMPORTANT: use `translate` (not `transform`) so it doesn't override the float animation.
+            style={
+              {
+                translate: `${p.x}px ${p.y}px`,
+              } as any
+            }
+          >
+            <span
+              className="pointer-events-none absolute inset-0 rounded-full opacity-0 transition-opacity duration-200
+                         bg-[radial-gradient(circle_at_25%_25%,rgba(140,110,255,0.35),transparent_60%)]
+                         group-hover:opacity-100"
+            />
+            <span
+              className="pointer-events-none absolute inset-0 rounded-full opacity-0 transition-opacity duration-200
+                         ring-1 ring-white/10 group-hover:opacity-100"
+            />
+            {s}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function TranscriptDrawer({
+  open,
+  onClose,
+  title,
+  segments,
+  currentIdx,
+  narrationMode,
+  visibleText,
+  fullCurrentText,
+  onJumpTo,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  segments: Segment[];
+  currentIdx: number;
+  narrationMode: "audio" | "text";
+  visibleText: string;
+  fullCurrentText: string;
+  onJumpTo: (idx: number) => void;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    // focus the close button for keyboard users
+    setTimeout(() => {
+      panelRef.current?.querySelector<HTMLButtonElement>("[data-close='1']")?.focus();
+    }, 0);
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-60">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/55 backdrop-blur-sm"
+        onClick={onClose}
+        aria-label="Fermer la transcription"
+      />
+      <div className="absolute inset-x-0 bottom-0 px-4 pb-4">
+        <div
+          ref={panelRef}
+          className={cn(
+            "mx-auto w-full max-w-2xl",
+            "glass-panel border border-white/10 overflow-hidden",
+            "shadow-[0_24px_90px_rgba(0,0,0,0.6)]"
+          )}
+          style={{
+            // keep it “app-like” on mobile: drawer scrolls internally
+            maxHeight: "82dvh",
+          }}
+        >
+          {/* Header */}
+          <div className="flex items-center gap-3 px-4 py-3 border-b border-white/8">
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] uppercase tracking-wide text-foreground-subtle">Transcription</div>
+              <div className="text-sm font-medium text-foreground truncate">{title}</div>
+            </div>
+
+            <button
+              data-close="1"
+              type="button"
+              onClick={onClose}
+              className={cn(
+                "control-button w-10 h-10",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-2 focus-visible:ring-offset-black/30"
+              )}
+              aria-label="Fermer"
+              title="Fermer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Body (internal scroll) */}
+          <div className="px-4 py-4 overflow-auto" style={{ maxHeight: "calc(82dvh - 56px)" }}>
+            {/* Current segment (karaoke highlight if in text mode) */}
+            <div className="mb-4">
+              <div className="text-xs uppercase tracking-wide text-foreground-subtle mb-2">
+                Segment {currentIdx + 1} / {segments.length}
+                {narrationMode === "text" ? " · Karaoké" : ""}
+              </div>
+
+              <div className="glass-panel border border-white/10 p-3">
+                {narrationMode === "text" ? (
+                  <p className="text-sm text-foreground whitespace-pre-wrap">
+                    <span className="text-white">{visibleText}</span>
+                    {visibleText.length < fullCurrentText.length ? (
+                      <span className="text-white/35">{fullCurrentText.slice(visibleText.length)}</span>
+                    ) : null}
+                  </p>
+                ) : (
+                  <p className="text-sm text-foreground whitespace-pre-wrap">{fullCurrentText}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Full list */}
+            <div className="space-y-2">
+              <div className="text-xs uppercase tracking-wide text-foreground-subtle mb-2">Tous les segments</div>
+
+              {segments.map((s, i) => {
+                const isCurrent = i === currentIdx;
+                return (
+                  <button
+                    key={`${s.canon_cursor}-${i}`}
+                    type="button"
+                    onClick={() => onJumpTo(i)}
+                    className={cn(
+                      "w-full text-left",
+                      "px-3 py-2 rounded-2xl border transition",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-2 focus-visible:ring-offset-black/30",
+                      isCurrent
+                        ? "border-white/18 bg-white/10"
+                        : "border-white/8 bg-white/5 hover:bg-white/8 hover:border-white/14"
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-3 mb-1">
+                      <div className={cn("text-xs", isCurrent ? "text-white/80" : "text-foreground-subtle")}>
+                        Segment {i + 1}
+                      </div>
+                      {isCurrent ? <span className="text-[10px] text-white/70">EN COURS</span> : null}
+                    </div>
+                    <div className={cn("text-sm line-clamp-2", isCurrent ? "text-white/90" : "text-foreground/85")}>
+                      {s.segment_text}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PlayerView() {
   const navigate = useNavigate();
   const { episodeId } = useParams<{ episodeId: string }>();
@@ -115,6 +340,8 @@ export default function PlayerView() {
   const bgmRef = useRef<HTMLAudioElement | null>(null);
   const sfxRef = useRef<HTMLAudioElement | null>(null);
   const sfxTimerRef = useRef<number | null>(null);
+
+  const sfxWasPlayingRef = useRef<boolean>(false);
 
   // fades/ducking
   const bgmFadeTimerRef = useRef<number | null>(null);
@@ -141,6 +368,9 @@ export default function PlayerView() {
   // Drawer "ask" mode (free text question)
   const [drawerMode, setDrawerMode] = useState<"read" | "ask">("read");
   const [draftQuestion, setDraftQuestion] = useState("");
+
+  // ✅ Transcription drawer (internal scroll, no page scroll)
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   // Narration state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -221,7 +451,6 @@ export default function PlayerView() {
       if (!duration || duration <= 0) return 0;
       return Math.max(0, Math.min(100, Math.round((currentTime / duration) * 100)));
     }
-    // text mode: smoother progression based on revealed chars (when started)
     const text = current?.segment_text || "";
     if (!text.length) return 0;
     const p = Math.round((textVisibleChars / text.length) * 100);
@@ -295,37 +524,41 @@ export default function PlayerView() {
     // keep textVisibleChars for resume
   }
 
-  function pauseAllPlayback() {
-    // narration audio
-    const a = audioRef.current;
-    if (a && !a.paused) {
-      try {
-        a.pause();
-      } catch {}
+    function pauseAllPlayback() {
+      // Narration
+      const a = audioRef.current;
+      if (a && !a.paused) {
+        try {
+          a.pause();
+        } catch {}
+      }
+
+      // Text mode
+      stopTextPlayback();
+
+      // BGM (pause doux)
+      bgmFadeOutAndPause();
+
+      // SFX: pause si en cours, et stop timer
+      stopSfxTimer();
+      const sfx = sfxRef.current;
+      if (sfx) {
+        try {
+          sfxWasPlayingRef.current = !sfx.paused && sfx.currentTime > 0;
+          sfx.pause();
+        } catch {}
+      }
+
+      setIsPlaying(false);
     }
-
-    // text mode
-    stopTextPlayback();
-
-    // bgm fade out + pause
-    bgmFadeOutAndPause();
-
-    // sfx
-    stopSfxTimer();
-    stopSfxNow();
-
-    setIsPlaying(false);
-  }
 
   function stopAllPlayback() {
     stopNarrationAudio();
     bgmFadeOutAndPause(true);
     stopSfxTimer();
     stopSfxNow();
-
     setTextStartedAt(null);
     setTextVisibleChars(0);
-
     setIsPlaying(false);
     setDuration(0);
     setCurrentTime(0);
@@ -340,8 +573,44 @@ export default function PlayerView() {
     audioUrlRef.current = url;
     a.src = url;
 
-    setCurrentTime(0);
-    await a.play();
+      setCurrentTime(0);
+      await a.play();
+      setIsPlaying(true); // ✅ garantit aussi pour l’audio ElevenLabs / ask
+  }
+
+  async function playUrlAudio(url: string, opts?: { volume?: number | null; atMs?: number | null }) {
+    stopNarrationAudio();
+    const a = audioRef.current;
+    if (!a) return;
+
+    // IMPORTANT: do NOT set audioUrlRef here (only for blob URLs)
+    a.src = url;
+
+    // volume
+    const vol = Math.max(0, Math.min(1, safeNumber(opts?.volume, 1)));
+    a.volume = vol;
+
+    // optional seek
+    const atSec = Math.max(0, safeNumber(opts?.atMs, 0) / 1000);
+    if (atSec > 0) {
+      // if metadata not ready yet, wait once
+      if (!Number.isFinite(a.duration) || a.duration === 0) {
+       await new Promise<void>((resolve) => {
+        const onMeta = () => {
+          a.removeEventListener("loadedmetadata", onMeta);
+          resolve();
+        };
+        a.addEventListener("loadedmetadata", onMeta, { once: true });
+      });
+    }
+    try {
+      a.currentTime = atSec;
+    } catch {}
+  }
+
+      setCurrentTime(0);
+      await a.play();
+      setIsPlaying(true); // ✅ garantit que l’UI passe en Pause
   }
 
   // -------------------------
@@ -436,7 +705,6 @@ export default function PlayerView() {
     setNarrationMode("audio");
     setIdx((v) => v + 1);
 
-    // allow state to update to next segment before replay
     setTimeout(() => {
       void playNarration();
     }, 60);
@@ -449,17 +717,27 @@ export default function PlayerView() {
     const a = audioRef.current;
     if (!a) return;
 
-    const onPlay = () => {
-      setIsPlaying(true);
+    const syncIsPlaying = () => {
+      // ✅ source de vérité: état réel de l'élément audio
+      setIsPlaying(Boolean(a && !a.paused));
+    };
+
+    const onPlaying = () => {
+      syncIsPlaying();
       if (narrationMode === "audio") applyDucking(true);
     };
+
     const onPause = () => {
-      if (narrationMode === "audio") {
-        applyDucking(false);
-        setIsPlaying(false);
-      }
+      syncIsPlaying();
+      if (narrationMode === "audio") applyDucking(false);
     };
-    const onTime = () => setCurrentTime(a.currentTime || 0);
+
+    const onTime = () => {
+      setCurrentTime(a.currentTime || 0);
+      // ✅ maintient l’UI en sync même si un event est raté
+      syncIsPlaying();
+    };
+    
     const onLoaded = () => setDuration(a.duration || 0);
     const onEnded = () => {
       if (narrationMode === "audio") applyDucking(false);
@@ -467,14 +745,14 @@ export default function PlayerView() {
       void goNextAndAutoplay();
     };
 
-    a.addEventListener("play", onPlay);
+    a.addEventListener("playing", onPlaying);
     a.addEventListener("pause", onPause);
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("loadedmetadata", onLoaded);
     a.addEventListener("ended", onEnded);
 
     return () => {
-      a.removeEventListener("play", onPlay);
+      a.removeEventListener("playing", onPlaying);
       a.removeEventListener("pause", onPause);
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("loadedmetadata", onLoaded);
@@ -493,7 +771,6 @@ export default function PlayerView() {
     if (textStartedAt === null) return;
 
     let raf = 0;
-
     const text = current.segment_text;
 
     const segDurSec = (() => {
@@ -566,6 +843,7 @@ export default function PlayerView() {
         setCurrentResponse("");
         setDrawerMode("read");
         setDraftQuestion("");
+        setTranscriptOpen(false);
 
         const epRes = await api.get<{ episode: Episode }>("/episode", { episode_id: episodeId });
         if (cancelled) return;
@@ -647,8 +925,16 @@ export default function PlayerView() {
     const sfxUrl = resolvePublicAssetUrl(current.sfx_url || "");
     if (!sfxUrl) return;
 
-    const baseDelayMs = Math.max(0, safeNumber(current.sfx_at_ms, 0));
-    const delayMs = options?.immediate ? 0 : baseDelayMs;
+        const baseDelayMs = Math.max(0, safeNumber(current.sfx_at_ms, 0));
+
+    // If narration already started, align SFX with narration time (best-effort)
+    const narrationMs =
+      narrationMode === "audio" && audioRef.current
+        ? Math.floor((audioRef.current.currentTime || 0) * 1000)
+        : 0;
+
+    const remainingMs = Math.max(0, baseDelayMs - narrationMs);
+    const delayMs = options?.immediate ? 0 : remainingMs;
     const vol = Math.max(0, Math.min(1, safeNumber(current.sfx_volume, 0.8)));
 
     sfxTimerRef.current = window.setTimeout(async () => {
@@ -672,21 +958,33 @@ export default function PlayerView() {
 
       setHasStartedPlayback(true);
 
-      // Start BGM + SFX
       await bgmFadeIn();
       scheduleSfxForCurrentSegment({ immediate: true });
 
-      // try audio narration
+      // ✅ Narration must come from a pre-recorded mp3 track
+      const narrationUrl = resolvePublicAssetUrl(current.narration_url || "");
+      if (!narrationUrl) {
+        // fallback to text (no narration track)
+        stopNarrationAudio();
+
+        setNarrationMode("text");
+        setIsPlaying(true);
+        setTextVisibleChars(0);
+        setTextStartedAt(performance.now());
+
+        setErr("Narration mp3 manquante pour ce segment (fallback texte).");
+        return;
+      }
+
       setNarrationMode("audio");
       setIsPlaying(true);
 
-      const res = await api.post<{ audio: AudioPayload }>("/tts", {
-        text: current.segment_text,
-        speaker_id: current.speaker_id,
+      await playUrlAudio(narrationUrl, {
+        volume: current.narration_volume ?? 1,
+        atMs: current.narration_at_ms ?? 0,
       });
-
-      await playBase64Audio(res.audio);
     } catch (e) {
+      // If mp3 fails, fallback to text
       stopNarrationAudio();
 
       await bgmFadeIn();
@@ -699,7 +997,7 @@ export default function PlayerView() {
 
       setHasStartedPlayback(true);
 
-      setErr(`Audio indisponible (fallback texte). ${String(e)}`);
+      setErr(`Narration mp3 indisponible (fallback texte). ${String(e)}`);
     }
   }
 
@@ -749,7 +1047,6 @@ export default function PlayerView() {
 
   function openMicAsk() {
     pauseAllPlayback();
-
     setMicState("listening");
     setDrawerMode("ask");
     setDraftQuestion("");
@@ -804,7 +1101,7 @@ export default function PlayerView() {
   // -------------------------
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="h-dvh overflow-hidden flex items-center justify-center">
         <p className="text-foreground-muted">Loading…</p>
       </div>
     );
@@ -812,7 +1109,7 @@ export default function PlayerView() {
 
   if (!episodeId) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="h-dvh overflow-hidden flex items-center justify-center">
         <p className="text-foreground-muted">episodeId manquant</p>
       </div>
     );
@@ -826,7 +1123,13 @@ export default function PlayerView() {
   const visibleText = narrationMode === "text" ? narrationText.slice(0, textVisibleChars) : narrationText;
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div
+      className={cn(
+        // ✅ "App feel": no page scroll
+        "h-dvh overflow-hidden",
+        "flex flex-col"
+      )}
+    >
       {/* Cinematic blurred background (episode cover) */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
         <div
@@ -835,19 +1138,14 @@ export default function PlayerView() {
             backgroundImage: coverUrl ? `url("${coverUrl}")` : "none",
           }}
         />
-
         <div
           className="absolute inset-0 bg-center bg-cover opacity-70 animate-cover-drift"
           style={{
             backgroundImage: coverUrl ? `url("${coverUrl}")` : "none",
           }}
         />
-
         <div className="absolute inset-0 backdrop-blur-3xl bg-black/35" />
-
-        {/* ✅ FIX typo */}
         <div className="absolute inset-0 bg-linear-to-b from-black/35 via-black/35 to-black/80" />
-
         <div className="absolute -inset-24 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.12),transparent_55%)]" />
       </div>
 
@@ -856,17 +1154,31 @@ export default function PlayerView() {
       <audio ref={sfxRef} />
       <audio ref={audioRef} className="hidden" />
 
-      {/* Header */}
-      <header className="px-6 py-5 flex items-center gap-4">
+      {/* Header (no scroll) */}
+      <header className="shrink-0 px-4 sm:px-6 py-4 sm:py-5 flex items-center gap-3 sm:gap-4">
         <button onClick={() => navigate(backTo)} className="control-button w-10 h-10" aria-label="Retour">
           <ChevronLeft className="w-6 h-6" />
         </button>
 
         <div className="flex-1 min-w-0">
           <p className="text-xs text-foreground-subtle uppercase tracking-wide truncate">{seasonTitle}</p>
+          <p className="text-[11px] text-foreground-muted truncate">
+            Segment {idx + 1} / {segments.length}
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Transcription drawer */}
+          <button
+            className="control-button w-10 h-10"
+            aria-label="Transcription"
+            title="Transcription"
+            type="button"
+            onClick={() => setTranscriptOpen(true)}
+          >
+            <FileText className="w-5 h-5" />
+          </button>
+
           <button
             className={`control-button w-10 h-10 ${autoplayEnabled ? "" : "opacity-50"}`}
             aria-label="Toggle autoplay"
@@ -905,7 +1217,7 @@ export default function PlayerView() {
 
         {profiles.length ? (
           <select
-            className="glass-panel px-3 py-2 text-sm outline-none"
+            className="hidden md:block glass-panel px-3 py-2 text-sm outline-none"
             value={profileId}
             onChange={(e) => setProfileId(e.target.value)}
           >
@@ -920,47 +1232,45 @@ export default function PlayerView() {
       </header>
 
       {err ? (
-        <div className="px-6">
+        <div className="shrink-0 px-4 sm:px-6">
           <div className="glass-panel px-4 py-3 border border-red-500/40 text-red-200">{err}</div>
         </div>
       ) : null}
 
-      {/* Main */}
-      <main className="flex-1 flex flex-col items-center justify-center px-6 pb-10">
-        {/* HERO (cover centered + orbit right on desktop) */}
-        <div className="relative w-full max-w-4xl">
+      {/* Main (no page scroll; everything fits; internal scroll only in drawers/panels) */}
+      <main className="flex-1 min-h-0 flex flex-col items-center justify-center px-4 sm:px-6 pb-6">
+        {/* HERO wrapper must allow overflow for desktop orbit */}
+        <div className="relative w-full max-w-4xl overflow-visible">
+          {/* ✅ Desktop orbit: absolute right, floating */}
           <div className="hidden lg:block absolute top-1/2 -translate-y-1/2 right-0 z-30">
-            <SuggestionOrbit
+            <DesktopOrbit
               suggestions={suggestions}
-              onSelect={(s: string) => ask(s)}
               disabled={busyAsk}
-              variant="right"
-              className="translate-x-10"
+              onSelect={(s) => ask(s)}
             />
           </div>
 
-          <div className="relative z-10 flex items-center justify-center mb-8">
+          {/* cover */}
+          <div className="relative z-10 flex items-center justify-center mb-5 sm:mb-7">
             <OrbAnimation size={300} isActive={isPlaying} className="absolute" />
-
             <ProgressRing progress={progress} size={260} strokeWidth={4} className="z-10">
               <CircularCover src={coverUrl || ""} alt={episodeTitle} size="xl" />
             </ProgressRing>
           </div>
         </div>
 
-        <h1 className="text-2xl font-semibold text-foreground text-center mb-2 animate-fade-in">
+        <h1 className="text-xl sm:text-2xl font-semibold text-foreground text-center mb-2 animate-fade-in px-2">
           {episodeTitle}
         </h1>
 
-        <p className="text-sm text-foreground-muted mb-5">
+        <p className="text-sm text-foreground-muted mb-4 sm:mb-5 text-center">
           {narrationMode === "audio" ? (
             <>
               {formatTime(currentTime)} / {duration ? formatTime(duration) : "—"}
             </>
           ) : (
             <>Lecture texte</>
-          )}{" "}
-          · Segment {idx + 1} / {segments.length}
+          )}
         </p>
 
         <AudioControls
@@ -968,7 +1278,11 @@ export default function PlayerView() {
           onPlayPause={async () => {
             const a = audioRef.current;
 
-            if (isPlaying) {
+            // ✅ source of truth: audio element state (when in audio mode)
+            const actuallyPlaying =
+              narrationMode === "audio" ? Boolean(a && !a.paused) : isPlaying;
+
+            if (actuallyPlaying) {
               pauseAllPlayback();
               return;
             }
@@ -978,6 +1292,7 @@ export default function PlayerView() {
             await bgmFadeIn();
             scheduleSfxForCurrentSegment({ immediate: true });
 
+            // Resume TEXT mode if it was already started
             if (narrationMode === "text" && hasStartedPlayback) {
               setIsPlaying(true);
 
@@ -1000,8 +1315,11 @@ export default function PlayerView() {
               return;
             }
 
+            // AUDIO resume
             if (a && narrationMode === "audio" && a.src) {
               try {
+                await bgmFadeIn();
+                scheduleSfxForCurrentSegment(); // resync based on currentTime
                 await a.play();
               } catch (e) {
                 setErr(`Playback failed: ${String(e)}`);
@@ -1013,16 +1331,27 @@ export default function PlayerView() {
           }}
           onPrevious={onPrev}
           onNext={onNext}
-          className="mb-6"
+          className="mb-5 sm:mb-6"
         />
 
+        {/* Karaoke preview panel (optional, internal scroll only) */}
         {hasStartedPlayback && narrationMode === "text" && current ? (
-          <div className="w-full max-w-lg glass-panel p-4 mb-6">
-            <div className="text-xs uppercase tracking-wide text-foreground-subtle mb-2">
-              Narration (karaoké)
+          <div className="w-full max-w-lg glass-panel p-4 mb-5 sm:mb-6">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="text-xs uppercase tracking-wide text-foreground-subtle">Narration (karaoké)</div>
+              <button
+                type="button"
+                className={cn(
+                  "px-3 py-1.5 rounded-full text-xs border border-white/10 bg-white/5 hover:bg-white/10 transition",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-2 focus-visible:ring-offset-black/30"
+                )}
+                onClick={() => setTranscriptOpen(true)}
+              >
+                Transcription
+              </button>
             </div>
 
-            <div className="text-sm text-foreground whitespace-pre-wrap">
+            <div className="text-sm text-foreground whitespace-pre-wrap max-h-[18dvh] overflow-auto pr-1">
               {visibleText}
               {isPlaying ? <span className="opacity-60">▍</span> : null}
             </div>
@@ -1033,7 +1362,8 @@ export default function PlayerView() {
           </div>
         ) : null}
 
-        <div className="w-full max-w-lg mb-6 flex items-center justify-center">
+        {/* Micro action */}
+        <div className="w-full max-w-lg mb-4 sm:mb-6 flex items-center justify-center">
           <button
             type="button"
             className="mic-button"
@@ -1048,6 +1378,7 @@ export default function PlayerView() {
           </button>
         </div>
 
+        {/* Mobile suggestions dock */}
         <div className="lg:hidden w-full max-w-lg">
           <SuggestionChips
             suggestions={suggestions}
@@ -1059,6 +1390,7 @@ export default function PlayerView() {
         </div>
       </main>
 
+      {/* Ask/Answer drawer (already internal scroll by your component) */}
       <AIResponseDrawer
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -1070,12 +1402,39 @@ export default function PlayerView() {
         onSubmit={submitDraftQuestion}
         submitLabel={busyAsk ? "Envoi..." : "Envoyer"}
         disabled={busyAsk}
-        helperText={
-          drawerMode === "ask"
-            ? "La narration est interrompue. Écris ta question puis envoie."
-            : undefined
-        }
+        helperText={drawerMode === "ask" ? "La narration est interrompue. Écris ta question puis envoie." : undefined}
       />
+
+      {/* ✅ Transcription drawer (internal scroll, no page scroll) */}
+      <TranscriptDrawer
+        open={transcriptOpen}
+        onClose={() => setTranscriptOpen(false)}
+        title={episodeTitle}
+        segments={segments}
+        currentIdx={idx}
+        narrationMode={narrationMode}
+        visibleText={narrationMode === "text" ? visibleText : narrationText}
+        fullCurrentText={narrationText}
+        onJumpTo={(nextIdx) => {
+          stopAllPlayback();
+          setNarrationMode("audio");
+          setIdx(nextIdx);
+          setTranscriptOpen(false);
+        }}
+      />
+
+      {/* Small local styles (kept here to avoid touching global files) */}
+      <style>{`
+        @keyframes coverDrift {
+          0%   { transform: scale(1.08) translate3d(-1.5%, -1%, 0); filter: blur(26px) saturate(1.05); }
+          50%  { transform: scale(1.12) translate3d(1.5%, 1%, 0);  filter: blur(28px) saturate(1.1); }
+          100% { transform: scale(1.08) translate3d(-1.5%, -1%, 0); filter: blur(26px) saturate(1.05); }
+        }
+        .animate-cover-drift {
+          animation: coverDrift 18s ease-in-out infinite;
+          will-change: transform, filter;
+        }
+      `}</style>
     </div>
   );
 }
