@@ -760,7 +760,7 @@ async function preloadNextNarration() {
     if (!autoplayEnabled) return;
     if (idx >= segments.length - 1) return;
 
-    stopAllPlayback();
+    pauseAllPlayback(); // ou même rien du tout
     setNarrationMode("audio");
     setIdx((v) => v + 1);
 
