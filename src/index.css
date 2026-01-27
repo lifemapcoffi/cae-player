@@ -388,19 +388,33 @@
    Animations
 ----------------------------- */
 @layer utilities {
+  /* =============================
+     Halo / Orb (rotate + pulse)
+  ============================= */
+
+  /* rotation */
   @keyframes halo-spin {
-    to {
-      transform: rotate(360deg);
-    }
+    to { transform: rotate(360deg); }
+  }
+
+  /* pulse (respiration) */
+  @keyframes halo-pulse {
+    0%, 100% { transform: scale(1); opacity: 0.30; }
+    50%      { transform: scale(var(--halo-scale, 1.06)); opacity: 0.55; }
+  }
+
+  /* glow pulse (variation d’intensité) */
+  @keyframes halo-glow {
+    0%, 100% { opacity: 0.55; filter: blur(10px); }
+    50%      { opacity: 0.95; filter: blur(14px); }
   }
 
   /* Halo animé autour du cover */
   .cover-halo {
     position: absolute;
-    inset: -3px;                 /* épaisseur/écart autour du cercle */
+    inset: -3px; /* épaisseur/écart autour du cercle */
     border-radius: 9999px;
     pointer-events: none;
-    opacity: 0.35;
 
     /* anneau lumineux */
     background: conic-gradient(
@@ -414,8 +428,15 @@
       transparent 360deg
     );
 
+    opacity: 0.35;
     filter: blur(0.2px) drop-shadow(0 0 100px rgba(168, 85, 247, 0.45));
-    animation: halo-spin 9.2s linear infinite;
+
+    /* ✅ pulse + rotate ensemble */
+    animation:
+      halo-spin 9.2s linear infinite,
+      halo-pulse 1.7s ease-in-out infinite;
+
+    transform-origin: center;
 
     /* on découpe en anneau (trou au milieu) */
     -webkit-mask: radial-gradient(
@@ -430,7 +451,7 @@
     );
   }
 
-  /* couche douce violette derrière (optionnelle mais très “Lovable”) */
+  /* couche douce derrière */
   .cover-halo-glow {
     position: absolute;
     inset: -22px;
@@ -439,54 +460,71 @@
     background: radial-gradient(circle at 50% 50%, rgba(168, 85, 247, 0.20), transparent 60%);
     filter: blur(10px);
     opacity: 0.9;
+
+    /* ✅ glow pulse */
+    animation: halo-glow 1.8s ease-in-out infinite;
+    transform-origin: center;
   }
+
+  /* Option: quand pas actif (pause) */
+  .cover-halo.is-paused,
+  .cover-halo-glow.is-paused {
+    animation-play-state: paused;
+    opacity: 0.18;
+    filter: blur(0.2px);
+  }
+
+  /* =============================
+     OrbAnimation.tsx helpers
+     (si tu utilises mon composant)
+  ============================= */
+  @keyframes orb-rotate {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  @keyframes orb-rotate-rev {
+    from { transform: rotate(360deg); }
+    to   { transform: rotate(0deg); }
+  }
+  @keyframes orb-pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(var(--orb-scale, 1.05)); }
+  }
+  @keyframes orb-glow {
+    0%, 100% { opacity: 0.25; }
+    50%      { opacity: 0.55; }
+  }
+
+  .animate-orb-rotate { animation: orb-rotate 14s linear infinite; }
+  .animate-orb-rotate-rev { animation: orb-rotate-rev 18s linear infinite; }
+  .animate-orb-pulse { animation: orb-pulse 1.6s ease-in-out infinite; transform-origin: center; }
+  .animate-orb-pulse-slow { animation: orb-pulse 2.3s ease-in-out infinite; transform-origin: center; }
+  .animate-orb-glow { animation: orb-glow 1.8s ease-in-out infinite; }
+
+  /* =============================
+     Existing animations (unchanged)
+  ============================= */
   @keyframes fade-in {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 
   @keyframes scale-in {
-    from {
-      opacity: 0;
-      transform: scale(0.98);
-    }
-    to {
-      opacity: 1;
-      transform: scale(1);
-    }
+    from { opacity: 0; transform: scale(0.98); }
+    to   { opacity: 1; transform: scale(1); }
   }
 
-  .animate-fade-in {
-    animation: fade-in 0.45s ease-out forwards;
-  }
+  .animate-fade-in { animation: fade-in 0.45s ease-out forwards; }
+  .animate-scale-in { animation: scale-in 0.35s ease-out forwards; }
 
-  .animate-scale-in {
-    animation: scale-in 0.35s ease-out forwards;
-  }
-
-  .text-foreground-muted {
-    color: hsl(var(--muted-foreground));
-  }
-
-  .text-foreground-subtle {
-    color: hsl(var(--muted-foreground));
-    opacity: 0.85;
-  }
+  .text-foreground-muted { color: hsl(var(--muted-foreground)); }
+  .text-foreground-subtle { color: hsl(var(--muted-foreground)); opacity: 0.85; }
 
   @keyframes pageIn {
     from { opacity: 0; transform: translateY(8px); }
     to   { opacity: 1; transform: translateY(0px); }
   }
-
-  .animate-page-in {
-    animation: pageIn 320ms cubic-bezier(.2,.8,.2,1) both;
-  }
+  .animate-page-in { animation: pageIn 320ms cubic-bezier(.2,.8,.2,1) both; }
 
   @keyframes coverDrift {
     0%   { transform: scale(1.08) translate3d(-1.5%, -1%, 0); filter: blur(26px) saturate(1.05); }
@@ -500,9 +538,23 @@
     opacity: 0.08;
   }
 
-.animate-cover-drift {
-  animation: coverDrift 18s ease-in-out infinite;
-  will-change: transform, filter;
+  .animate-cover-drift {
+    animation: coverDrift 18s ease-in-out infinite;
+    will-change: transform, filter;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cover-halo,
+    .cover-halo-glow,
+    .animate-orb-rotate,
+    .animate-orb-rotate-rev,
+    .animate-orb-pulse,
+    .animate-orb-pulse-slow,
+    .animate-orb-glow,
+    .animate-cover-drift {
+      animation: none !important;
+    }
+  }
 }
 
   /* -----------------------
@@ -626,4 +678,3 @@ body {
 .h-svh { height: 100svh; }
 .min-h-svh { min-height: 100svh; }
 
-}

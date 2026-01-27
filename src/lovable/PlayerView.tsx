@@ -1489,7 +1489,11 @@ async function playNarration() {
 
           {/* cover */}
           <div className="relative z-10 flex items-center justify-center mb-5 sm:mb-7">
-            <OrbAnimation size={300} isActive={isPlaying} className="absolute" />
+            <OrbAnimation
+              size={300}
+              isActive={isPlaying}
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-0"
+            />
             <ProgressRing progress={progress} size={260} strokeWidth={4} className="z-10">
               <CircularCover src={coverUrl || ""} alt={episodeTitle} size="xl" />
             </ProgressRing>
