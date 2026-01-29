@@ -1,8 +1,8 @@
 // src/pages/PlayerPage.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { api } from "@/lib/api";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
 const DEFAULT_PROFILE_ID = import.meta.env.VITE_PROFILE_ID || "";
 
 // Covers fallback (Supabase Storage public bucket)
@@ -13,24 +13,6 @@ function b64ToBlobUrl(b64, mime = "audio/mpeg") {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const blob = new Blob([bytes], { type: mime });
   return URL.createObjectURL(blob);
-}
-
-async function apiGet(path) {
-  const r = await fetch(`${API_BASE}${path}`);
-  const json = await r.json().catch(() => ({}));
-  if (!r.ok || json?.ok === false) throw new Error(json?.error || `HTTP ${r.status}`);
-  return json;
-}
-
-async function apiPost(path, body) {
-  const r = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const json = await r.json().catch(() => ({}));
-  if (!r.ok || json?.ok === false) throw new Error(json?.error || `HTTP ${r.status}`);
-  return json;
 }
 
 function roleKeyToSpeakerId(roleKey) {
@@ -89,6 +71,8 @@ export default function PlayerPage() {
 
   const [episode, setEpisode] = useState(null);
   const [season, setSeason] = useState(null);
+
+  const [episodePkId, setEpisodePkId] = useState(null); // ✅ real UUID for FK queries
 
   const [segments, setSegments] = useState([]);
   const [idx, setIdx] = useState(0);
@@ -180,37 +164,51 @@ export default function PlayerPage() {
 
         setEpisode(null);
         setSeason(null);
+        setEpisodePkId(null);
         setSegments([]);
         setIdx(0);
         setProfiles([]);
         setProfileId(DEFAULT_PROFILE_ID);
         setSuggestions([]);
 
-        const epRes = await apiGet(`/episode?episode_id=${encodeURIComponent(episodeId)}`);
+        // 1) Fetch episode (supports uuid OR season_key:episode_key via backend)
+        const epRes = await api.get(`/episode`, { episode_id: episodeId });
         const ep = epRes.episode || null;
         if (cancelled) return;
+
         setEpisode(ep);
 
+        // 2) Normalize episode UUID for all FK-dependent routes
+        // backend should return episode.episode_id (uuid pk)
+        const realEpisodeId = ep?.episode_id || (ep?.id && String(ep.id).length >= 30 ? ep.id : null);
+        if (!realEpisodeId) {
+          throw new Error("Episode missing episode_id (UUID). Backend /episode must return episode_id.");
+        }
+        setEpisodePkId(realEpisodeId);
+
+        // 3) Season (optional)
         if (ep?.season_key) {
           try {
-            const sRes = await apiGet(`/season?season_key=${encodeURIComponent(ep.season_key)}&status=all`);
+            const sRes = await api.get(`/season`, { season_key: ep.season_key, status: "all" });
             if (!cancelled) setSeason(sRes.season || null);
           } catch {
             if (!cancelled) setSeason(null);
           }
         }
 
-        const segRes = await apiGet(`/segments?episode_id=${encodeURIComponent(episodeId)}`);
+        // 4) Segments (must use UUID)
+        const segRes = await api.get(`/segments`, { episode_id: realEpisodeId });
         const segs = segRes.segments || [];
         if (cancelled) return;
         setSegments(segs);
         setIdx(0);
 
-        const profRes = await apiGet(`/profiles?episode_id=${encodeURIComponent(episodeId)}`);
+        // 5) Profiles (must use UUID)
+        const profRes = await api.get(`/profiles`, { episode_id: realEpisodeId });
         const profsRaw = profRes.profiles || [];
         const profs = (profsRaw || []).map((p) => ({
-          id: p.id,
-          label: p.label || p.name || p.id,
+          id: p.id ?? p.profile_id, // tolerate either key
+          label: p.label || p.name || p.id || p.profile_id,
           role_key: p.role_key || null,
         }));
         if (cancelled) return;
@@ -236,17 +234,16 @@ export default function PlayerPage() {
 
   // Suggestions for current segment
   useEffect(() => {
-    if (!episodeId || !current?.canon_cursor) return;
+    if (!episodePkId || !current?.canon_cursor) return;
 
     let cancelled = false;
 
     (async () => {
       try {
-        const res = await apiGet(
-          `/suggestions?episode_id=${encodeURIComponent(episodeId)}&canon_cursor=${encodeURIComponent(
-            current.canon_cursor
-          )}`
-        );
+        const res = await api.get(`/suggestions`, {
+          episode_id: episodePkId,
+          canon_cursor: current.canon_cursor,
+        });
         if (cancelled) return;
         setSuggestions(res.suggestions || []);
       } catch {
@@ -257,7 +254,7 @@ export default function PlayerPage() {
     return () => {
       cancelled = true;
     };
-  }, [episodeId, current?.canon_cursor]);
+  }, [episodePkId, current?.canon_cursor]);
 
   // Covers
   const episodeCoverUrl = useMemo(() => {
@@ -295,7 +292,7 @@ export default function PlayerPage() {
       if (!current) return;
       setBusyAudio(true);
 
-      const res = await apiPost("/tts", {
+      const res = await api.post(`/tts`, {
         text: current.segment_text,
         speaker_id: current.speaker_id,
       });
@@ -309,7 +306,7 @@ export default function PlayerPage() {
   }
 
   async function runAsk(qText) {
-    if (!episodeId || !current) return;
+    if (!episodePkId || !current) return;
     const q = String(qText || "").trim();
     if (!q) return;
     if (!profileId) throw new Error("No profile selected");
@@ -318,8 +315,8 @@ export default function PlayerPage() {
     setAnswerText("");
     setAnswerAccepted(null);
 
-    const res = await apiPost("/ask", {
-      episode_id: episodeId,
+    const res = await api.post(`/ask`, {
+      episode_id: episodePkId, // ✅ must be UUID
       canon_cursor: current.canon_cursor,
       profile_id: profileId,
       question: q,
@@ -336,7 +333,7 @@ export default function PlayerPage() {
 
     if (res.answer_text) {
       const speaker_id = roleKeyToSpeakerId(selectedProfile?.role_key);
-      const tts = await apiPost("/tts", { text: res.answer_text, speaker_id });
+      const tts = await api.post(`/tts`, { text: res.answer_text, speaker_id });
       await playBase64Audio(tts.audio);
     }
   }
@@ -514,7 +511,16 @@ export default function PlayerPage() {
 
       {/* Episode header */}
       {(episodeCoverUrl || seasonCoverUrl || episode?.synopsis) && (
-        <div style={{ ...styles.card, marginTop: 12, display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div
+          style={{
+            ...styles.card,
+            marginTop: 12,
+            display: "flex",
+            gap: 12,
+            alignItems: "flex-start",
+            flexWrap: "wrap",
+          }}
+        >
           {(episodeCoverUrl || seasonCoverUrl) && (
             <img
               src={episodeCoverUrl || seasonCoverUrl}

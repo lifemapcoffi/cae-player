@@ -2,15 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { episodeCoverFallback, seasonCoverFallback } from "../lib/covers.js";
-
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
-
-async function apiGet(path) {
-  const r = await fetch(`${API_BASE}${path}`);
-  const json = await r.json().catch(() => ({}));
-  if (!r.ok || json?.ok === false) throw new Error(json?.error || `HTTP ${r.status}`);
-  return json;
-}
+import { api } from "@/lib/api"; // ✅ réutilise ta stratégie API_BASE robuste
 
 export default function SeasonPage() {
   const { seasonKey } = useParams();
@@ -31,7 +23,7 @@ export default function SeasonPage() {
         setLoading(true);
 
         // ✅ single call: seasons + episodes + summaries
-        const res = await apiGet(`/library-with-summaries?status=all`);
+        const res = await api.get("/library-with-summaries", { status: "all" });
         if (cancelled) return;
 
         setSeasons(res.seasons || []);
@@ -43,7 +35,7 @@ export default function SeasonPage() {
         setSummariesById(res.summaries_by_episode_id || {});
       } catch (e) {
         if (cancelled) return;
-        setErr(String(e));
+        setErr(e?.message || String(e));
         setSeasons([]);
         setEpisodes([]);
         setSummariesById({});
@@ -75,7 +67,15 @@ export default function SeasonPage() {
         seasonCover ||
         null;
 
-      const summary = summariesById?.[e.id] || null;
+      // ✅ episodeFrontId robuste : priorité au vrai PK episode_id
+      const episodeFrontId =
+        e.episode_id ||
+        e.id ||
+        (e.season_key && e.episode_key ? `${e.season_key}:${e.episode_key}` : null);
+
+      // ✅ la summary est indexée par episode_id (uuid) côté backend
+      const summaryKey = e.episode_id || e.id || null;
+      const summary = (summaryKey && summariesById?.[summaryKey]) || null;
 
       // ✅ display priority: summary_short -> synopsis -> empty
       const cardText =
@@ -92,6 +92,7 @@ export default function SeasonPage() {
         ui_card_text: summaryPending ? "(summary pending… lance le worker)" : cardText,
         ui_has_summary: !!(summary?.summary_short && String(summary.summary_short).trim()),
         ui_generated_at: summary?.generated_at || null,
+        ui_episode_front_id: episodeFrontId,
       };
     });
   }, [episodes, summariesById, seasonTitle, seasonCover]);
@@ -153,7 +154,7 @@ export default function SeasonPage() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
             {uiEpisodes.map((e) => (
               <div
-                key={e.id}
+                key={e.ui_episode_front_id || e.id || e.episode_id || `${e.season_key}:${e.episode_key}`}
                 style={{
                   border: "1px solid #222",
                   borderRadius: 14,
@@ -180,26 +181,31 @@ export default function SeasonPage() {
                     {e.title}
                   </div>
 
-                  {/* ✅ Summary */}
                   <div style={{ opacity: 0.8, fontSize: 13, minHeight: 38, lineHeight: 1.35 }}>
                     {e.ui_card_text}
                   </div>
 
                   <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <Link
-                      to={`/play/${encodeURIComponent(e.id)}`}
-                      style={{
-                        display: "inline-block",
-                        padding: "8px 10px",
-                        borderRadius: 10,
-                        background: "#2563eb",
-                        color: "white",
-                        textDecoration: "none",
-                        border: "1px solid #1d4ed8",
-                      }}
-                    >
-                      ▶ Play
-                    </Link>
+                    {e.ui_episode_front_id ? (
+                      <Link
+                        to={`/play/${encodeURIComponent(e.ui_episode_front_id)}`}
+                        style={{
+                          display: "inline-block",
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          background: "#2563eb",
+                          color: "white",
+                          textDecoration: "none",
+                          border: "1px solid #1d4ed8",
+                        }}
+                      >
+                        ▶ Play
+                      </Link>
+                    ) : (
+                      <div style={{ opacity: 0.7, fontSize: 12 }}>
+                        Missing episode id (need episode_id or season_key:episode_key)
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
